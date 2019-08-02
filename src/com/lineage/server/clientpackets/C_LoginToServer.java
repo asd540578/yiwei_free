@@ -1,0 +1,614 @@
+package com.lineage.server.clientpackets;
+
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import com.lineage.data.event.OnlineGiftSet;
+import com.lineage.data.npc.Npc_clan;
+import com.lineage.echo.ClientExecutor;
+import com.lineage.server.ActionCodes;
+import com.lineage.server.datatables.GetBackRestartTable;
+import com.lineage.server.datatables.SkillsTable;
+import com.lineage.server.datatables.lock.CharBookReading;
+import com.lineage.server.datatables.lock.CharBuffReading;
+import com.lineage.server.datatables.lock.CharSkillReading;
+import com.lineage.server.datatables.lock.CharacterConfigReading;
+import com.lineage.server.datatables.lock.ClanEmblemReading;
+import com.lineage.server.datatables.sql.CharacterTable;
+import com.lineage.server.model.L1CastleLocation;
+import com.lineage.server.model.L1Clan;
+import com.lineage.server.model.L1War;
+import com.lineage.server.model.Instance.L1ItemInstance;
+import com.lineage.server.model.Instance.L1PcInstance;
+import com.lineage.server.model.Instance.L1SummonInstance;
+import com.lineage.server.serverpackets.S_AddSkill;
+import com.lineage.server.serverpackets.S_Bookmarks;
+import com.lineage.server.serverpackets.S_CastleMaster;
+import com.lineage.server.serverpackets.S_CharResetInfo;
+import com.lineage.server.serverpackets.S_PacketBoxConfig;
+import com.lineage.server.serverpackets.S_Emblem;
+import com.lineage.server.serverpackets.S_EnterGame;
+import com.lineage.server.serverpackets.S_EquipmentWindow;
+import com.lineage.server.serverpackets.S_InvList;
+import com.lineage.server.serverpackets.S_ItemName;
+import com.lineage.server.serverpackets.S_MapID;
+import com.lineage.server.serverpackets.S_OtherCharPacks;
+import com.lineage.server.serverpackets.S_OwnCharPack;
+import com.lineage.server.serverpackets.S_OwnCharStatus;
+import com.lineage.server.serverpackets.S_PacketBoxIcon1;
+import com.lineage.server.serverpackets.S_PacketBoxProtection;
+import com.lineage.server.serverpackets.S_SPMR;
+import com.lineage.server.serverpackets.S_ServerMessage;
+import com.lineage.server.serverpackets.S_War;
+import com.lineage.server.serverpackets.S_Weather;
+import com.lineage.server.templates.L1BookMark;
+import com.lineage.server.templates.L1Config;
+import com.lineage.server.templates.L1EmblemIcon;
+import com.lineage.server.templates.L1GetBackRestart;
+import com.lineage.server.templates.L1PcOtherList;
+import com.lineage.server.templates.L1Skills;
+import com.lineage.server.templates.L1UserSkillTmp;
+import com.lineage.server.timecontroller.server.ServerUseMapTimer;
+import com.lineage.server.timecontroller.server.ServerWarExecutor;
+import com.lineage.server.world.World;
+import com.lineage.server.world.WorldClan;
+import com.lineage.server.world.WorldSummons;
+import com.lineage.server.world.WorldWar;
+
+/**
+ * 要求進入遊戲
+ *
+ * @author daien
+ *
+ */
+public class C_LoginToServer extends ClientBasePacket {
+
+	private static final Log _log = LogFactory.getLog(C_LoginToServer.class);
+
+	/*
+	 * public C_LoginToServer() { }
+	 * 
+	 * public C_LoginToServer(final byte[] abyte0, final ClientExecutor client) {
+	 * super(abyte0); try { this.start(abyte0, client);
+	 * 
+	 * } catch (final Exception e) { _log.error(e.getLocalizedMessage(), e); } }
+	 */
+
+	@Override
+	public void start(final byte[] decrypt, final ClientExecutor client) {
+		try {
+			// 資料載入
+			this.read(decrypt);
+
+			final String loginName = client.getAccountName();
+			// System.out.println("帳號: " + login);
+			// System.out.println("人物名稱: " + charName);
+
+			if (client.getActiveChar() != null) {
+				_log.error("帳號重複登入人物: " + loginName + "強制中斷連線");
+				client.kick();
+				return;
+			}
+
+			final String charName = this.readS();
+
+			final L1PcInstance pc = L1PcInstance.load(charName);
+
+			if ((pc == null) || !loginName.equals(pc.getAccountName())) {
+				_log.info("無效登入要求: " + charName + " 帳號(" + loginName + ", " + client.getIp() + ")");
+				client.kick();
+				return;
+			}
+
+			/*
+			 * if (Config.LEVEL_DOWN_RANGE != 0) { if (pc.getHighLevel() - pc.getLevel() >=
+			 * Config.LEVEL_DOWN_RANGE) { _log.info("超出人物可創範圍: " + charName + " 帳號(" +
+			 * loginName + ", " + client.getIp() + ")"); client.kick(); return; } }
+			 */
+
+			_log.info("登入遊戲: " + charName + " 帳號(" + loginName + ", " + client.getIp() + ")");
+
+			pc.setNetConnection(client);// 登記封包接收組
+			pc.setPacketOutput(client.out());// 登記封包發送組
+
+			final int currentHpAtLoad = pc.getCurrentHp();
+			final int currentMpAtLoad = pc.getCurrentMp();
+
+			// 重置錯誤次數
+			client.set_error(0);
+
+			pc.clearSkillMastery();// 清除技能資訊
+			pc.setOnlineStatus(1);// 設定連線狀態
+
+			CharacterTable.updateOnlineStatus(pc);
+			World.get().storeObject(pc);
+
+			pc.setNetConnection(client);// 登記封包接收組
+			pc.setPacketOutput(client.out());// 登記封包發送組
+			client.setActiveChar(pc);// 登記玩家資料
+
+			this.getOther(pc);// 額外紀錄資料
+
+			// 宣告進入遊戲
+			pc.sendPackets(new S_EnterGame());
+
+			// 讀取角色道具
+			this.items(pc);
+
+			// pc.setEquipped(pc, true);
+
+			// 取得記憶座標資料
+			this.bookmarks(pc);
+
+			// 判斷座標資料
+			this.backRestart(pc);
+
+			// 取得遊戲焦點
+			this.getFocus(pc);
+
+			pc.sendVisualEffectAtLogin();
+
+			this.skills(pc);// 取得角色魔法技能資料
+
+			pc.turnOnOffLight();
+
+			if (pc.getCurrentHp() > 0) {
+				pc.setDead(false);
+				pc.setStatus(0);
+
+			} else {
+				pc.setDead(true);
+				pc.setStatus(ActionCodes.ACTION_Die);
+			}
+
+			// 取回快速鍵紀錄
+			final L1Config config = CharacterConfigReading.get().get(pc.getId());
+			if (config != null) {
+				pc.sendPackets(new S_PacketBoxConfig(config));
+			}
+
+			this.serchSummon(pc);// 取得殘留寵物資訊
+
+			ServerWarExecutor.get().checkCastleWar(pc);// 檢查城堡戰爭狀態
+
+			this.war(pc);// 戰爭狀態
+
+			this.marriage(pc);// 取得婚姻資料
+
+			if (currentHpAtLoad > pc.getCurrentHp()) {
+				pc.setCurrentHp(currentHpAtLoad);
+			}
+			if (currentMpAtLoad > pc.getCurrentMp()) {
+				pc.setCurrentMp(currentMpAtLoad);
+			}
+
+			this.buff(pc);// 取得物品與魔法特殊效果
+
+			pc.startHpRegeneration();
+			pc.startMpRegeneration();
+
+			pc.startObjectAutoUpdate();// PC 可見物更新處理
+
+			this.crown(pc);// 送出王冠資料
+
+			pc.save(); // 資料回存
+
+			if (pc.getHellTime() > 0) {
+				pc.beginHell(false);
+			}
+			// 送出人物屬性資料
+			pc.sendPackets(new S_CharResetInfo(pc));
+
+			// 載入人物任務資料
+			pc.getQuest().load();
+
+			// 送出展示視窗
+			pc.showWindows();
+
+			if (pc.get_food() >= 225) {// LOLI 生存吶喊
+				final Calendar cal = Calendar.getInstance();
+				long h_time = cal.getTimeInMillis() / 1000;// 換算為秒
+				pc.set_h_time(h_time);// 紀錄登入時間
+			}
+
+			if (pc.getLevel() <= 20) {// LOLI 戰鬥特化
+				pc.sendPackets(new S_PacketBoxProtection(S_PacketBoxProtection.ENCOUNTER, 1));
+			}
+
+		} catch (final Exception e) {
+			// _log.error(e.getLocalizedMessage(), e);
+
+		} finally {
+			this.over();
+		}
+	}
+
+	/**
+	 * 送出王冠資料
+	 * 
+	 * @param pc
+	 */
+	private void crown(final L1PcInstance pc) {
+		try {
+			final Map<Integer, L1Clan> map = L1CastleLocation.mapCastle();
+			for (Integer key : map.keySet()) {
+				final L1Clan clan = map.get(key);
+				if (clan != null) {
+					if (key.equals(2)) {
+						pc.sendPackets(new S_CastleMaster(8, clan.getLeaderId()));
+
+					} else {
+						pc.sendPackets(new S_CastleMaster(key, clan.getLeaderId()));
+					}
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得焦點
+	 *
+	 * @param pc
+	 */
+	private void getFocus(L1PcInstance pc) {
+		try {
+			// 重置副本編號
+			pc.set_showId(-1);
+
+			// 將物件增加到MAP世界裡
+			World.get().addVisibleObject(pc);
+
+			// 角色資訊
+			pc.sendPackets(new S_OwnCharStatus(pc));
+
+			// 更新角色所在的地圖
+			pc.sendPackets(new S_MapID(pc, pc.getMapId(), pc.getMap().isUnderwater()));
+
+			// 物件封包(本身)
+			pc.sendPackets(new S_OwnCharPack(pc));
+
+			final ArrayList<L1PcInstance> otherPc = World.get().getVisiblePlayer(pc);
+			if (otherPc.size() > 0) {
+				for (final L1PcInstance tg : otherPc) {
+					// 物件封包(其他人物)
+					tg.sendPackets(new S_OtherCharPacks(pc));
+				}
+			}
+
+			// 更新魔攻與魔防
+			pc.sendPackets(new S_SPMR(pc));
+
+			// 閃避率更新 修正 thatmystyle (UID: 3602)
+			pc.sendPackets(new S_PacketBoxIcon1(true, pc.get_dodge()));
+
+			// 天氣效果
+			pc.sendPackets(new S_Weather(World.get().getWeather()));
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 能力質選取資料
+	 *
+	 * @param pc
+	 */
+	/*
+	 * private void bonusstats(final L1PcInstance pc) { try { // 人物屬性變更選取 if
+	 * ((pc.getLevel() >= 51) && (pc.getLevel() - 50 > pc.getBonusStats())) { if
+	 * ((pc.getBaseStr() + pc.getBaseDex() + pc.getBaseCon() + pc.getBaseInt() +
+	 * pc.getBaseWis() + pc.getBaseCha()) < (ConfigAlt.POWER * 6)) {
+	 * pc.sendPackets(new S_Bonusstats(pc.getId())); } }
+	 * 
+	 * } catch (final Exception e) { _log.error(e.getLocalizedMessage(), e); } }
+	 */
+
+	/**
+	 * 取得婚姻資料
+	 *
+	 * @param pc
+	 */
+	private void marriage(final L1PcInstance pc) {
+		try {
+			if (pc.getPartnerId() != 0) { // 結婚中
+				final L1PcInstance partner = (L1PcInstance) World.get().findObject(pc.getPartnerId());
+				if ((partner != null) && (partner.getPartnerId() != 0)) {
+					if ((pc.getPartnerId() == partner.getId()) && (partner.getPartnerId() == pc.getId())) {
+						// 548 你的情人目前正在線上。
+						pc.sendPackets(new S_ServerMessage(548));
+						// 549 你的情人上線了!!
+						partner.sendPackets(new S_ServerMessage(549));
+					}
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 其它數據
+	 *
+	 * @param pc
+	 * @throws Exception
+	 */
+	private void getOther(final L1PcInstance pc) throws Exception {
+		try {
+			pc.set_otherList(new L1PcOtherList(pc));
+
+			pc.addMaxHp(pc.get_other().get_addhp());
+			pc.addMaxMp(pc.get_other().get_addmp());
+
+			// 在線獎勵
+			OnlineGiftSet.add(pc);
+
+			final int time = pc.get_other().get_usemapTime();
+
+			if (time > 0) {
+				ServerUseMapTimer.put(pc, time);
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得血盟 與 血盟戰爭資料
+	 *
+	 * @param pc
+	 */
+	private void war(final L1PcInstance pc) {
+		try {
+			if (pc.getClanid() != 0) { // 血盟資料不為0
+				final L1Clan clan = WorldClan.get().getClan(pc.getClanname());
+				if (clan != null) {
+					// 判斷血盟名稱相等 雨 血盟編號相等
+					if ((pc.getClanid() == clan.getClanId())
+							&& pc.getClanname().toLowerCase().equals(clan.getClanName().toLowerCase())) {
+						final L1PcInstance[] clanMembers = clan.getOnlineClanMember();
+						for (final L1PcInstance clanMember : clanMembers) {
+							if (clanMember.getId() != pc.getId()) {
+								// 843 血盟成員%0%s剛進入遊戲。
+								clanMember.sendPackets(new S_ServerMessage(843, pc.getName()));
+							}
+						}
+
+						final int clanMan = clan.getOnlineClanMember().length;
+						pc.sendPackets(new S_ServerMessage("\\fU線上血盟成員:" + clanMan));
+
+						if (clan.isClanskill()) {
+							switch (pc.get_other().get_clanskill()) {
+							case 1:// 狂暴
+								pc.sendPackets(new S_ServerMessage(Npc_clan.SKILLINFO[0]));
+								break;
+							case 2:// 寂靜
+								pc.sendPackets(new S_ServerMessage(Npc_clan.SKILLINFO[1]));
+								break;
+							case 4:// 魔擊
+								pc.sendPackets(new S_ServerMessage(Npc_clan.SKILLINFO[2]));
+								break;
+							case 8:// 消魔
+								pc.sendPackets(new S_ServerMessage(Npc_clan.SKILLINFO[3]));
+								break;
+							}
+						}
+
+						// 送出盟輝
+						final L1EmblemIcon emblemIcon = ClanEmblemReading.get().get(clan.getClanId());
+						if (emblemIcon != null) {
+							pc.sendPackets(new S_Emblem(emblemIcon));
+						}
+
+						// 目前全部戰爭資訊取得
+						for (final L1War war : WorldWar.get().getWarList()) {
+							final boolean ret = war.checkClanInWar(pc.getClanname());
+							if (ret) { // 是否正在戰爭中
+								final String enemy_clan_name = war.getEnemyClanName(pc.getClanname());
+								if (enemy_clan_name != null) {
+									// \f1目前你的血盟與 %0 血盟交戰當中。
+									pc.sendPackets(new S_War(8, pc.getClanname(), enemy_clan_name));
+								}
+								break;
+							}
+						}
+					}
+
+				} else {
+					pc.setClanid(0);
+					pc.setClanname("");
+					pc.setClanRank(0);
+					pc.save();
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 所在座標位置資料判斷
+	 *
+	 * @param pc
+	 */
+	private void backRestart(final L1PcInstance pc) {
+		try {
+
+			// 指定MAP回村設置
+			final L1GetBackRestart gbr = GetBackRestartTable.get().getGetBackRestart(pc.getMapId());
+			if (gbr != null) {
+				pc.setX(gbr.getLocX());
+				pc.setY(gbr.getLocY());
+				pc.setMap(gbr.getMapId());
+			}
+
+			// 戰爭區域回村設置
+			final int castle_id = L1CastleLocation.getCastleIdByArea(pc);
+			if (castle_id > 0) {
+				if (ServerWarExecutor.get().isNowWar(castle_id)) {
+					final L1Clan clan = WorldClan.get().getClan(pc.getClanname());
+					if (clan != null) {
+						if (clan.getCastleId() != castle_id) {
+							// 城主クランではない
+							int[] loc = new int[3];
+							loc = L1CastleLocation.getGetBackLoc(castle_id);
+							pc.setX(loc[0]);
+							pc.setY(loc[1]);
+							pc.setMap((short) loc[2]);
+						}
+
+					} else {
+						// クランに所属して居ない場合は帰還
+						int[] loc = new int[3];
+						loc = L1CastleLocation.getGetBackLoc(castle_id);
+						pc.setX(loc[0]);
+						pc.setY(loc[1]);
+						pc.setMap((short) loc[2]);
+					}
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得物品資料
+	 *
+	 * @param pc
+	 */
+	private void items(final L1PcInstance pc) {
+		try {
+			// 背包物品封包傳遞
+			CharacterTable.restoreInventory(pc);
+			final List<L1ItemInstance> items = pc.getInventory().getItems();
+			if (items.size() > 0) {
+				pc.sendPackets(new S_InvList(items));
+
+				final List<L1ItemInstance> eqs = new ArrayList<L1ItemInstance>();
+
+				for (final L1ItemInstance item : items) {
+					
+					if (item.getItem().getType2() == 0) {
+						continue;
+					}
+					
+					if (item.isEquipped()) {
+						pc.sendPackets(new S_ItemName(item));
+						eqs.add(item);
+					}
+
+					pc.sendPackets(new S_EquipmentWindow(S_EquipmentWindow.TYPE_3, 1, 3));
+					pc.sendPackets(new S_EquipmentWindow(S_EquipmentWindow.TYPE_3, 2, 1));
+					pc.sendPackets(new S_EquipmentWindow(S_EquipmentWindow.TYPE_4, 1, 0));
+				}
+
+				pc.sendPackets(new S_EquipmentWindow(eqs));
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得記憶座標資料 3.63
+	 * 
+	 * @param pc
+	 */
+	private void bookmarks(final L1PcInstance pc) {
+		try {
+			final ArrayList<L1BookMark> bookList = CharBookReading.get().getBookMarks(pc);
+
+			if (bookList != null && bookList.size() > 0)
+				pc.sendPackets(new S_Bookmarks(bookList));
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得人物技能清單
+	 *
+	 * @param pc
+	 */
+	private void skills(final L1PcInstance pc) {
+		try {
+			final ArrayList<L1UserSkillTmp> skillList = CharSkillReading.get().skills(pc.getId());
+
+			final int[] skills = new int[28];
+
+			if (skillList != null) {
+				if (skillList.size() > 0) {
+					for (final L1UserSkillTmp userSkillTmp : skillList) {
+						// 取得魔法資料
+						final L1Skills skill = SkillsTable.get().getTemplate(userSkillTmp.get_skill_id());
+						skills[(skill.getSkillLevel() - 1)] += skill.getId();
+						// _log.error("skill.getSkillLevel() - 1" + (skill.getSkillLevel() - 1) + "
+						// skill.getId():" + skill.getId());
+					}
+					// 送出資料
+					pc.sendPackets(new S_AddSkill(pc, skills));
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得殘留寵物資訊
+	 *
+	 * @param pc
+	 */
+	private void serchSummon(final L1PcInstance pc) {
+		try {
+			final Collection<L1SummonInstance> summons = WorldSummons.get().all();
+			if (summons.size() > 0) {
+				for (final L1SummonInstance summon : summons) {
+					if (summon.getMaster().getId() == pc.getId()) {
+						summon.setMaster(pc);
+						pc.addPet(summon);
+					}
+				}
+			}
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * 取得保留技能紀錄
+	 * 
+	 * @param pc
+	 */
+	private void buff(final L1PcInstance pc) {
+		try {
+			// 保留技能紀錄
+			CharBuffReading.get().buff(pc);
+
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	@Override
+	public String getType() {
+		return this.getClass().getSimpleName();
+	}
+}

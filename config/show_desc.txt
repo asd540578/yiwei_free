@@ -1,0 +1,4 @@
+﻿#這是服務器的定時公告
+# SERVER_NAME是服務器的中文名稱
+SERVER_NAME = 伊薇
+\fT【提示】有疑問可以按 Ctrl + H 看說明。

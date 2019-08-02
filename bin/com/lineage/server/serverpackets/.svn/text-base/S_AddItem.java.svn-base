@@ -1,0 +1,64 @@
+package com.lineage.server.serverpackets;
+
+import com.lineage.server.model.Instance.L1ItemInstance;
+
+/**
+ * 物品增加
+ * @author dexc
+ *
+ */
+public class S_AddItem extends ServerBasePacket {
+
+	private byte[] _byte = null;
+
+	/**
+	 * 物品增加
+	 */
+	public S_AddItem(final L1ItemInstance item) {
+		this.writeC(S_OPCODE_ADDITEM);
+		this.writeD(item.getId());
+		int type = item.getItem().getUseType();
+		if (type < 0) {
+			type = 0;
+		}
+		this.writeC(type);
+		
+		if (item.getChargeCount() > 0) {
+			this.writeC(item.getChargeCount());// 可用次數
+			
+		} else {
+			this.writeC(0x00);// 可用次數
+		}
+		
+		this.writeH(item.get_gfxid());
+		this.writeC(item.getBless());
+		this.writeD((int) Math.min(item.getCount(), 2000000000));
+		this.writeC((item.isIdentified()) ? 0x01 : 0x00);
+		this.writeS(item.getViewName());
+		if (!item.isIdentified()) {
+			// 未鑑定 不發送詳細資訊
+			this.writeC(0x00);
+			
+		} else {
+			final byte[] status = item.getStatusBytes();
+			this.writeC(status.length);
+			for (final byte b : status) {
+				this.writeC(b);
+			}
+		}
+	}
+
+	@Override
+	public byte[] getContent() {
+		if (this._byte == null) {
+			this._byte = this.getBytes();
+		}
+
+		return this._byte;
+	}
+
+	@Override
+	public String getType() {
+		return this.getClass().getSimpleName();
+	}
+}

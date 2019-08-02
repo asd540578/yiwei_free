@@ -1,0 +1,36 @@
+這是一個伊薇開源
+
+yiwei.bat = 啟動 yiwei.jar 為模擬器之開源原始碼
+
+YiweiServiceSystem = 客服系統 (請用連線 Mysql 實體IP )
+
+MYQSL SQL
+	
+	yiwei = 帳號管理資料庫 
+	yiwei_01 = 1服
+	yiwei_02 = 2服
+	yiwei_data = 遊戲資料庫
+     	yiwei_log = 世界紀錄檔
+
+
+客服系統注意事項 ：
+		
+	MYSQL_yiwei資料庫內 server_info 
+		 id = 伺服器編號
+		 server_name = 伺服器名稱
+		 open = 該伺服器是否加入客服系統
+		 sponsor = 該伺服器是否開放贊助
+
+
+免費開源不無實裝客服系統以下功能：
+
+1.開送物品
+2.活動設置
+3.金流串接
+
+自建表的介紹 
+
+server_activity_rank_config = 自動化結算發送獎勵 (衝等活動)  (未實裝)
+server_get_character_items = 自動化歸還 (誤刪,誤賣,誤點爆)  (未實裝)
+server_get_sponsor_package = 自動化贊助包裹發送 (未實裝)
+server_get_user_package= 客服系統專用物品發送至包裹 (未實裝)

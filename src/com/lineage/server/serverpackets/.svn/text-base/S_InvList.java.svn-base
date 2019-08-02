@@ -1,0 +1,70 @@
+package com.lineage.server.serverpackets;
+
+import java.util.List;
+
+import com.lineage.server.model.Instance.L1ItemInstance;
+
+/**
+ * 物品名單(背包)
+ * @author dexc
+ *
+ */
+public class S_InvList extends ServerBasePacket {
+
+	private byte[] _byte = null;
+
+	/**
+	 * 物品名單(背包)
+	 */
+	public S_InvList(final List<L1ItemInstance> items) {
+		this.writeC(S_OPCODE_INVLIST);
+		this.writeC(items.size()); // 道具數量
+
+		for (final L1ItemInstance item : items) {
+			this.writeD(item.getId());
+			int type = item.getItem().getUseType();
+			if (type < 0) {
+				type = 0;
+			}
+			this.writeC(type);// 使用類型 
+			
+			if (item.getChargeCount() <= 0) {
+				this.writeC(0x00);// 可用次數
+				
+			} else {
+				this.writeC(item.getChargeCount());// 可用次數
+			}
+			
+			this.writeH(item.get_gfxid());// 圖示
+			this.writeC(item.getBless());// 祝福狀態
+			
+			this.writeD((int) Math.min(item.getCount(), 2000000000));// 數量
+			this.writeC((item.isIdentified()) ? 0x01 : 0x00);// 鑑定狀態
+			this.writeS(item.getViewName());// 名稱
+			if (!item.isIdentified()) {
+				// 未見定狀態 不需發送詳細資料
+				this.writeC(0x00);
+				
+			} else {
+				final byte[] status = item.getStatusBytes();
+				this.writeC(status.length);
+				for (final byte b : status) {
+					this.writeC(b);
+				}
+			}
+		}
+	}
+
+	@Override
+	public byte[] getContent() {
+		if (this._byte == null) {
+			this._byte = this.getBytes();
+		}
+		return this._byte;
+	}
+
+	@Override
+	public String getType() {
+		return this.getClass().getSimpleName();
+	}
+}

@@ -1,0 +1,1189 @@
+package com.lineage.server.model;
+
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import com.lineage.config.ConfigRate;
+import com.lineage.data.item_armor.set.ArmorSet;
+import com.lineage.server.datatables.lock.CharItemsReading;
+import com.lineage.server.model.Instance.L1ItemInstance;
+import com.lineage.server.model.Instance.L1PcInstance;
+import com.lineage.server.model.Instance.L1PetInstance;
+import com.lineage.server.model.item.L1ItemId;
+import com.lineage.server.serverpackets.S_AddItem;
+import com.lineage.server.serverpackets.S_CharVisualUpdate;
+import com.lineage.server.serverpackets.S_DeleteInventoryItem;
+import com.lineage.server.serverpackets.S_EquipmentWindow;
+import com.lineage.server.serverpackets.S_ItemColor;
+import com.lineage.server.serverpackets.S_ItemName;
+import com.lineage.server.serverpackets.S_ItemStatus;
+import com.lineage.server.serverpackets.S_OwnCharStatus;
+import com.lineage.server.serverpackets.S_PacketBox;
+import com.lineage.server.serverpackets.S_ServerMessage;
+import com.lineage.server.templates.L1Item;
+
+/**
+ * 人物背包數據
+ * @author dexc
+ *
+ */
+public class L1PcInventory extends L1Inventory {
+
+	private static final Log _log = LogFactory.getLog(L1PcInventory.class);
+
+	private static final long serialVersionUID = 1L;
+
+	private static final int MAX_SIZE = 180;// 最大容量
+
+	private final L1PcInstance _owner; // 背包所有者
+
+	private int _arrowId; // 優先使用的箭ItemID
+
+	private int _stingId; // 優先使用的飛刀ItemID
+
+	public L1PcInventory(final L1PcInstance owner) {
+		this._owner = owner;
+		this._arrowId = 0;
+		this._stingId = 0;
+	}
+
+	public L1PcInstance getOwner() {
+		return this._owner;
+	}
+
+	/**
+	 * 傳回240階段重量
+	 * @return
+	 */
+	public int getWeight240() {
+		return this.calcWeight240(this.getWeight());
+	}
+
+	/**
+	 * 240階段重量計算
+	 * @param weight
+	 * @return
+	 */
+	public int calcWeight240(final long weight) {
+		int weight240 = 0;
+		if (ConfigRate.RATE_WEIGHT_LIMIT != 0) {
+			final double maxWeight = this._owner.getMaxWeight();
+			if (weight > maxWeight) {
+				weight240 = 240;
+				
+			} else {
+				double wpTemp = (weight * 100 / maxWeight) * 240.00 / 100.00;
+				final DecimalFormat df = new DecimalFormat("00.##");
+				df.format(wpTemp);
+				wpTemp = Math.round(wpTemp);
+				weight240 = (int) (wpTemp);
+			}
+			
+		} else { // ウェイトレートが０なら重量常に０
+			weight240 = 0;
+		}
+		
+		return weight240;
+	}
+
+	/**
+	 * 增加物品是否成功(背包)
+	 * @param item 物品
+	 * @param count 數量
+	 * @return 
+	 * 			0:成功
+	 * 			1:超過可攜帶數量
+	 * 			2:超過可攜帶重量
+	 * 			3:超過LONG最大質
+	 */
+	@Override
+	public int checkAddItem(final L1ItemInstance item, final long count) {
+		return this.checkAddItem(item, count, true);
+	}
+
+	/**
+	 * 增加物品是否成功(背包)
+	 * @param item 物品數據
+	 * @param count 數量
+	 * @param message 發送訊息
+	 * @return 
+	 * 			0:成功
+	 * 			1:超過可攜帶數量
+	 * 			2:超過可攜帶重量
+	 * 			3:超過LONG最大質
+	 */
+	public int checkAddItem(final L1Item item, final long count) {
+		if (item == null) {
+			return -1;
+		}
+
+		boolean isMaxSize = false;// 容量數據異常
+		boolean isWeightOver = false;// 重量數據異常
+		
+		// 可以堆疊
+		if (item.isStackable()) {
+			// 身上不具備該物件
+			if (!this.checkItem(item.getItemId())) {
+				// 超過可攜帶數量
+				if (this.getSize() + 1 >= MAX_SIZE) {
+					isMaxSize = true;
+				}
+			}
+			
+		// 不可以堆疊
+		} else {
+			// 超過可攜帶數量
+			if (this.getSize() + 1 >= MAX_SIZE) {
+				isMaxSize = true;
+			}
+		}
+
+		if (isMaxSize) {
+			// 263 \f1一個角色最多可攜帶180個道具。
+			this.sendOverMessage(263);
+			return SIZE_OVER;
+		}
+		
+		// 現有重量 + (物品重量 * 數量 / 1000) + 1
+		final long weight = this.getWeight() + item.getWeight() * count / 1000 + 1;
+		
+		// 重量數據異常 (重量計算表示小於0)
+		if ((weight < 0) || ((item.getWeight() * count / 1000) < 0)) {
+			isWeightOver = true;
+		}
+		
+		// 超過可攜帶重量
+		if (this.calcWeight240(weight) >= 240 && !isWeightOver) {
+			isWeightOver = true;
+		}
+
+		if (isWeightOver) {
+			// 82 此物品太重了，所以你無法攜帶。
+			this.sendOverMessage(82);
+			return WEIGHT_OVER;
+		}
+		return OK;
+	}
+
+	/**
+	 * 增加物品是否成功(背包)
+	 * @param item 物品(物品已加入世界)
+	 * @param count 數量
+	 * @param message 發送訊息
+	 * @return 
+	 * 			0:成功
+	 * 			1:超過可攜帶數量
+	 * 			2:超過可攜帶重量
+	 * 			3:超過LONG最大質
+	 */
+	public int checkAddItem(final L1ItemInstance item, final long count, final boolean message) {
+		if (item == null) {
+			return -1;
+		}
+		if (count <= 0) {
+			return -1;
+		}
+
+		boolean isMaxSize = false;// 容量數據異常
+		boolean isWeightOver = false;// 重量數據異常
+		
+		// 可以堆疊
+		if (item.isStackable()) {
+			// 身上不具備該物件
+			if (!this.checkItem(item.getItem().getItemId())) {
+				// 超過可攜帶數量
+				if (this.getSize() + 1 >= MAX_SIZE) {
+					isMaxSize = true;
+				}
+			}
+			
+		// 不可以堆疊
+		} else {
+			// 超過可攜帶數量
+			if (this.getSize() + 1 >= MAX_SIZE) {
+				isMaxSize = true;
+			}
+		}
+
+		if (isMaxSize) {
+			if (message) {
+				// 263 \f1一個角色最多可攜帶180個道具。
+				this.sendOverMessage(263);
+			}
+			return SIZE_OVER;
+		}
+		
+		// 現有重量 + (物品重量 * 數量 / 1000) + 1
+		final long weight = this.getWeight() + item.getItem().getWeight() * count / 1000 + 1;
+		
+		// 重量數據異常 (重量計算表示小於0)
+		if ((weight < 0) || ((item.getItem().getWeight() * count / 1000) < 0)) {
+			isWeightOver = true;
+		}
+		
+		// 超過可攜帶重量
+		if (this.calcWeight240(weight) >= 240 && !isWeightOver) {
+			isWeightOver = true;
+		}
+
+		if (isWeightOver) {
+			if (message) {
+				// 82 此物品太重了，所以你無法攜帶。
+				this.sendOverMessage(82);
+			}
+			return WEIGHT_OVER;
+		}
+		return OK;
+	}
+
+	public void sendOverMessage(final int message_id) {
+		this._owner.sendPackets(new S_ServerMessage(message_id));
+	}
+
+	/**
+	 * 初始化人物背包資料
+	 */
+	@Override
+	public void loadItems() {
+		try {
+			final CopyOnWriteArrayList<L1ItemInstance> items = 
+				CharItemsReading.get().loadItems(this._owner.getId());
+			
+			if (items != null) {
+				_items = items;
+				
+				List<L1ItemInstance> equipped = new CopyOnWriteArrayList<L1ItemInstance>();
+				for (final L1ItemInstance item : items) {
+					if (item.isEquipped()) {
+						equipped.add(item);
+					}
+					
+					item.setEquipped(false);
+					
+					if ((item.getItem().getType2() == 0)
+							&& (item.getItem().getType() == 2)) { // 照明道具
+						item.setRemainingTime(item.getItem().getLightFuel());
+					}
+				}
+				
+				// 將已經設置為裝備的防具 重新設置為裝備狀態
+				for (final L1ItemInstance item : equipped) {
+					this.setEquipped(item, true, true, false);
+				}
+			}
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * LIST物品資料新增
+	 */
+	@Override
+	public void insertItem(final L1ItemInstance item) {
+		if (item.getCount() <= 0) {
+			return;
+		}
+		// 設置使用者OBJID
+		item.set_char_objid(this._owner.getId());
+		
+		this._owner.sendPackets(new S_AddItem(item));
+		if (item.getItem().getWeight() != 0) {
+			// 重量
+			this._owner.sendPackets(new S_PacketBox(S_PacketBox.WEIGHT, this.getWeight240()));
+		}
+		
+		try {
+			CharItemsReading.get().storeItem(this._owner.getId(), item);
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	public static final int COL_ATTR_ENCHANT_LEVEL = 2048;
+
+	public static final int COL_ATTR_ENCHANT_KIND = 1024;
+
+	public static final int COL_BLESS = 512;
+
+	public static final int COL_REMAINING_TIME = 256;
+
+	public static final int COL_CHARGE_COUNT = 128;
+
+	public static final int COL_ITEMID = 64;
+
+	public static final int COL_DELAY_EFFECT = 32;
+
+	public static final int COL_COUNT = 16;
+
+	public static final int COL_EQUIPPED = 8;
+
+	public static final int COL_ENCHANTLVL = 4;
+
+	public static final int COL_IS_ID = 2;
+
+	public static final int COL_DURABILITY = 1;
+
+	@Override
+	public void updateItem(final L1ItemInstance item) {
+		this.updateItem(item, COL_COUNT);
+		if (item.getItem().isToBeSavedAtOnce()) {
+			this.saveItem(item, COL_COUNT);
+		}
+	}
+
+	/**
+	 * 背包內物件狀態更新
+	 *
+	 * @param item 需要更新的物件
+	 * @param column 更新種類
+	 */
+	@Override
+	public void updateItem(final L1ItemInstance item, int column) {
+		if (column >= COL_ATTR_ENCHANT_LEVEL) { // 属性強化数
+			this._owner.sendPackets(new S_ItemStatus(item));
+			column -= COL_ATTR_ENCHANT_LEVEL;
+		}
+		
+		if (column >= COL_ATTR_ENCHANT_KIND) { // 属性強化の種類
+			this._owner.sendPackets(new S_ItemStatus(item));
+			column -= COL_ATTR_ENCHANT_KIND;
+		}
+		
+		if (column >= COL_BLESS) { // 祝福・封印
+			this._owner.sendPackets(new S_ItemColor(item));
+			column -= COL_BLESS;
+		}
+		
+		if (column >= COL_REMAINING_TIME) { // 殘餘可用時間
+			this._owner.sendPackets(new S_ItemName(item));
+			column -= COL_REMAINING_TIME;
+		}
+		
+		if (column >= COL_CHARGE_COUNT) { // 殘餘可用次數
+			this._owner.sendPackets(new S_ItemName(item));
+			column -= COL_CHARGE_COUNT;
+		}
+		
+		if (column >= COL_ITEMID) { // 別のアイテムになる場合(便箋を開封したときなど)
+			this._owner.sendPackets(new S_ItemStatus(item));
+			this._owner.sendPackets(new S_ItemColor(item));
+			this._owner.sendPackets(new S_PacketBox(S_PacketBox.WEIGHT, this.getWeight240()));
+			column -= COL_ITEMID;
+		}
+		
+		if (column >= COL_DELAY_EFFECT) { // 効果ディレイ
+			column -= COL_DELAY_EFFECT;
+		}
+		
+		if (column >= COL_COUNT) { // カウント
+			this._owner.sendPackets(new S_ItemStatus(item));
+
+			final int weight = item.getWeight();
+			if (weight != item.getLastWeight()) {
+				item.setLastWeight(weight);
+				this._owner.sendPackets(new S_ItemStatus(item));
+				
+			} else {
+				this._owner.sendPackets(new S_ItemName(item));
+			}
+			if (item.getItem().getWeight() != 0) {
+				// XXX 240段階のウェイトが変化しない場合は送らなくてよい
+				this._owner.sendPackets(
+						new S_PacketBox(
+								S_PacketBox.WEIGHT,
+								this.getWeight240()
+								));
+			}
+			column -= COL_COUNT;
+		}
+		
+		if (column >= COL_EQUIPPED) { // 装備状態
+			this._owner.sendPackets(new S_ItemName(item));
+			column -= COL_EQUIPPED;
+		}
+		
+		if (column >= COL_ENCHANTLVL) { // エンチャント
+			this._owner.sendPackets(new S_ItemStatus(item));
+			column -= COL_ENCHANTLVL;
+		}
+		
+		if (column >= COL_IS_ID) { // 確認状態
+			this._owner.sendPackets(new S_ItemStatus(item));
+			this._owner.sendPackets(new S_ItemColor(item));
+			column -= COL_IS_ID;
+		}
+		
+		if (column >= COL_DURABILITY) { // 耐久性
+			this._owner.sendPackets(new S_ItemStatus(item));
+			column -= COL_DURABILITY;
+		}
+	}
+
+	/**
+	 * 背包內資料更新(SQL)
+	 *
+	 * @param item
+	 *            - 更新対象のアイテム
+	 * @param column
+	 *            - 更新するステータスの種類
+	 */
+	public void saveItem(final L1ItemInstance item, int column) {
+		if (column == 0) {
+			return;
+		}
+
+		try {
+			if (column >= COL_ATTR_ENCHANT_LEVEL) { // 属性強化数
+				CharItemsReading.get().updateItemAttrEnchantLevel(item);
+				column -= COL_ATTR_ENCHANT_LEVEL;
+			}
+			
+			if (column >= COL_ATTR_ENCHANT_KIND) { // 属性強化の種類
+				CharItemsReading.get().updateItemAttrEnchantKind(item);
+				column -= COL_ATTR_ENCHANT_KIND;
+			}
+			
+			if (column >= COL_BLESS) { // 祝福・封印
+				CharItemsReading.get().updateItemBless(item);
+				column -= COL_BLESS;
+			}
+			
+			if (column >= COL_REMAINING_TIME) { // 使用可能な残り時間
+				CharItemsReading.get().updateItemRemainingTime(item);
+				column -= COL_REMAINING_TIME;
+			}
+			
+			if (column >= COL_CHARGE_COUNT) { // チャージ数
+				CharItemsReading.get().updateItemChargeCount(item);
+				column -= COL_CHARGE_COUNT;
+			}
+			
+			if (column >= COL_ITEMID) { // 別のアイテムになる場合(便箋を開封したときなど)
+				CharItemsReading.get().updateItemId(item);
+				column -= COL_ITEMID;
+			}
+			
+			if (column >= COL_DELAY_EFFECT) { // 効果ディレイ
+				CharItemsReading.get().updateItemDelayEffect(item);
+				column -= COL_DELAY_EFFECT;
+			}
+			
+			if (column >= COL_COUNT) { // カウント
+				CharItemsReading.get().updateItemCount(item);
+				column -= COL_COUNT;
+			}
+			
+			if (column >= COL_EQUIPPED) { // 装備状態
+				CharItemsReading.get().updateItemEquipped(item);
+				column -= COL_EQUIPPED;
+			}
+			
+			if (column >= COL_ENCHANTLVL) { // エンチャント
+				CharItemsReading.get().updateItemEnchantLevel(item);
+				column -= COL_ENCHANTLVL;
+			}
+			
+			if (column >= COL_IS_ID) { // 確認状態
+				CharItemsReading.get().updateItemIdentified(item);
+				column -= COL_IS_ID;
+			}
+			
+			if (column >= COL_DURABILITY) { // 耐久性
+				CharItemsReading.get().updateItemDurability(item);
+				column -= COL_DURABILITY;
+			}
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+
+	/**
+	 * LIST物品資料移除
+	 */
+	@Override
+	public void deleteItem(final L1ItemInstance item) {
+		try {
+			CharItemsReading.get().deleteItem(this._owner.getId(), item);
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+		
+		if (item.isEquipped()) {
+			this.setEquipped(item, false);
+		}
+		
+		if (item != null) {
+			this._owner.sendPackets(new S_DeleteInventoryItem(item));
+			this._items.remove(item);
+			if (item.getItem().getWeight() != 0) {
+				this._owner.sendPackets(new S_PacketBox(S_PacketBox.WEIGHT, this.getWeight240()));
+			}
+		}
+	}
+
+	/**
+	 * アイテムを装着脱着させる（L1ItemInstanceの変更、補正値の設定、character_itemsの更新、パケット送信まで管理）
+	 * @param item
+	 * @param equipped
+	 */
+	public void setEquipped(final L1ItemInstance item, final boolean equipped) {
+		this.setEquipped(item, equipped, false, false);
+	}
+
+	/**
+	 * 
+	 * @param item         傳回物品
+	 * @param equipped     裝備 (開關)
+	 * @param loaded       隱身斗篷(開關)
+	 * @param changeWeapon 物件動作種類(開關)
+	 */
+	public void setEquipped(final L1ItemInstance item, final boolean equipped, final boolean loaded,
+			final boolean changeWeapon) {
+		if (item.isEquipped() != equipped) { // 設定値と違う場合だけ処理
+			final L1Item temp = item.getItem();
+			if (equipped) { // 装着
+				byte index = 0;
+				if (temp.getType2() == 1) {
+					index = EQUIPMENT_INDEX_WEAPON;
+				} else if (temp.getType2() == 2) {
+					index = intoEquipWindow(temp.getType());
+					if (index == EQUIPMENT_INDEX_NONE) {
+						_owner.sendPackets(new S_ServerMessage(144));
+						return;
+					}
+				}
+
+				if (!loaded) {
+					this._owner.sendPackets(new S_EquipmentWindow(item.getId(), index, true));
+				}
+
+				/// Equipped(item, true); //3.63 <---看這邊…順序一定要一樣
+
+				item.setEquipWindow(index);// 3.63
+
+				item.setEquipped(true);
+
+				// 裝備穿著效果判斷
+				this._owner.getEquipSlot().set(item);
+
+			} else { // 脱着
+				if (!loaded) {
+					// インビジビリティクローク バルログブラッディクローク装備中でインビジ状態の場合はインビジ状態の解除
+					if ((temp.getItemId() == 20077) || (temp.getItemId() == 20062) || (temp.getItemId() == 120077)) {
+						if (this._owner.isInvisble()) {
+							this._owner.delInvis();
+							return;
+						}
+					}
+					// 3.63
+					_owner.sendPackets(new S_EquipmentWindow(item.getId(), item.getEquipWindow(), false));
+				}
+				// Equipped(item, false); // 3.63 <---看這邊…順序一定要一樣
+				item.setEquipWindow(0);// 3.63
+				item.setEquipped(false);
+				// 裝備脫除效果判斷
+				this._owner.getEquipSlot().remove(item);
+			}
+
+			if (!loaded) { // 最初の読込時はＤＢパケット関連の処理はしない
+				// System.out.println("物品裝備狀態");
+				// XXX:意味のないセッター
+				this._owner.setCurrentHp(this._owner.getCurrentHp());
+				this._owner.setCurrentMp(this._owner.getCurrentMp());
+				this.updateItem(item, COL_EQUIPPED);
+				this._owner.sendPackets(new S_OwnCharStatus(this._owner));
+				// 武器の場合はビジュアル更新。ただし、武器の持ち替えで武器を脱着する時は更新しない
+				if ((temp.getType2() == 1) && (changeWeapon == false)) {
+					this._owner.sendPacketsAll(new S_CharVisualUpdate(this._owner));
+				}
+			}
+		}
+	}
+
+	public boolean checkRingEquipped(int id) {
+		for (Object itemObject : _items) {
+			L1ItemInstance item = (L1ItemInstance) itemObject;
+			if (item.getRingID() == id && item.isEquipped()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 裝備具有指定編號道具
+	 * @param id 物品編號
+	 * @return true:使用中 false:非使用中
+	 */
+	public boolean checkEquipped(final int id) {
+		try {
+			for (final L1ItemInstance item : this._items) {
+				// 物品編號相同 並且在使用中
+				if ((item.getItem().getItemId() == id) && item.isEquipped()) {
+					return true;
+				}
+			}
+			
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return false;
+	}
+
+	/**
+	 * 裝備具有指定名稱道具
+	 * @param nameid 物品名稱
+	 * @return true:使用中 false:非使用中
+	 */
+	public boolean checkEquipped(final String nameid) {
+		try {
+			for (final L1ItemInstance item : this._items) {
+				// 物品名稱相同 並且在使用中
+				if ((item.getName().equals(nameid)) && item.isEquipped()) {
+					return true;
+				}
+			}
+			
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return false;
+	}
+
+	/**
+	 * 裝備具有指定編號道具群(套裝)
+	 * @param ids
+	 * @return
+	 */
+	public boolean checkEquipped(final int[] ids) {
+		try {
+			for (final int id : ids) {
+				if (!this.checkEquipped(id)) {
+					return false;
+				}
+			}
+			
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return true;
+	}
+
+	/**
+	 * 裝備具有指定名稱道具群(套裝)
+	 * @param names
+	 * @return
+	 */
+	public boolean checkEquipped(final String[] names) {
+		try {
+			for (final String name : names) {
+				if (!this.checkEquipped(name)) {
+					return false;
+				}
+			}
+			
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return true;
+	}
+
+	/**
+	 * 裝備中指定類型物品數量
+	 * @param type2 類型
+	 * @param type 物品分類
+	 * 
+	 * @return 裝備中指定類型物品數量
+	 */
+	public int getTypeEquipped(final int type2, final int type) {
+		int equipeCount = 0;// 裝備中指定位置物品數量
+		try {
+			for (final L1ItemInstance item : this._items) {
+				// 物品類型相等 物品分類相等 並且在使用中
+				if ((item.getItem().getType2() == type2) &&  
+						(item.getItem().getType() == type) && 
+						item.isEquipped()) {
+					equipeCount++;// 使用數量+1
+				}
+			}
+
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return equipeCount;
+	}
+
+	/**
+	 * 裝備中指定類型物品
+	 * @param type2 類型
+	 * @param type 物品分類
+	 * 
+	 * @return 裝備中指定類型物品
+	 */
+	public L1ItemInstance getItemEquipped(final int type2, final int type) {
+		L1ItemInstance equipeitem = null;
+		try {
+			for (final L1ItemInstance item : this._items) {
+				// 物品類型相等 物品分類相等 並且在使用中
+				if ((item.getItem().getType2() == type2)
+						&& (item.getItem().getType() == type) && 
+						item.isEquipped()) {
+					equipeitem = item;
+					break;
+				}
+			}
+
+		} catch (final Exception ex) {
+			_log.error(ex.getLocalizedMessage(), ex);
+		}
+		return equipeitem;
+	}
+	
+	/**
+	 * 設置 顯示/消除 套裝效果 XXX
+	 * @param armorSet 套裝
+	 * @param isMode 是否顯示 額外屬性
+	 */
+	public void setPartMode(final ArmorSet armorSet, final boolean isMode) {
+		final int tgItemId = armorSet.get_ids()[0];// 取回套裝第一樣物品ID
+		final L1ItemInstance[] tgItems = findItemsId(tgItemId);
+		for (L1ItemInstance tgItem : tgItems) {
+			tgItem.setIsMatch(isMode);
+			this._owner.sendPackets(new S_ItemStatus(tgItem));
+		}
+	}
+	
+	/**
+	 * 裝備中戒指陣列 (修正戒指擴充欄位 3.63)
+	 * 
+	 * @return
+	 */
+	public final L1ItemInstance[] getRingEquipped() {
+		final List<L1ItemInstance> equipeItem = new ArrayList<L1ItemInstance>();
+		// 背包道具查找
+		for (final L1ItemInstance item : this._items) {
+			// 物品在使用中並且為戒指
+			if (item.isEquipped() && item.getItem().getUseType() == 23) { // 戒指
+				equipeItem.add(item);
+			}
+		}
+		return equipeItem.toArray(new L1ItemInstance[equipeItem.size()]);
+	}
+
+	// 変身時に装備できない装備を外す
+	public void takeoffEquip(final int polyid) {
+		this.takeoffWeapon(polyid);
+		this.takeoffArmor(polyid);
+	}
+
+	// 変身時に装備できない武器を外す
+	private void takeoffWeapon(final int polyid) {
+		if (this._owner.getWeapon() == null) { // 素手
+			return;
+		}
+
+		boolean takeoff = false;
+		final int weapon_type = this._owner.getWeapon().getItem().getType();
+		// 装備出来ない武器を装備してるか？
+		takeoff = !L1PolyMorph.isEquipableWeapon(polyid, weapon_type);
+
+		if (takeoff) {
+			this.setEquipped(this._owner.getWeapon(), false, false, false);
+		}
+	}
+
+	// 変身時に装備できない防具を外す
+	private void takeoffArmor(final int polyid) {
+		L1ItemInstance armor = null;
+
+		// ヘルムからガーダーまでチェックする
+		for (int type = 0; type <= 18; type++) {
+			// 装備していて、装備不可の場合は外す
+			if ((this.getTypeEquipped(2, type) != 0)
+					&& !L1PolyMorph.isEquipableArmor(polyid, type)) {
+				if (type == 9) { // リングの場合は、両手分外す
+					// 3.63 4戒
+					for (int i = 0; i < 4; i++) {
+						armor = this.getItemEquipped(2, type);
+						if (armor != null) {
+							this.setEquipped(armor, false, false, false);
+						}
+					}
+				} else {
+					armor = this.getItemEquipped(2, type);
+					if (armor != null) {
+						this.setEquipped(armor, false, false, false);
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * 使用的箭
+	 * @return
+	 */
+	public L1ItemInstance getArrow() {
+		return this.getBullet(-2);
+	}
+
+	/**
+	 * 使用的飛刀
+	 * @return
+	 */
+	public L1ItemInstance getSting() {
+		return this.getBullet(-3);
+	}
+
+	/**
+	 * 
+	 * @param useType
+	 * @return
+	 */
+	private L1ItemInstance getBullet(final int useType) {
+		L1ItemInstance bullet;
+		int priorityId = 0;
+		if (useType == -2) {
+			if (this._owner.getWeapon().getItemId() == 192) {// 水精靈之弓
+				bullet = this.findItemId(40742);// 古代之箭
+				if (bullet == null) {
+					// 329：\f1沒有具有 %0%o。  
+					this._owner.sendPackets(new S_ServerMessage(329, "$2377"));
+				}
+				return bullet;
+				
+			} else {
+				priorityId = this._arrowId; // 箭
+			}
+		}
+		
+		if (useType == -3) {
+			priorityId = this._stingId; // 飛刀
+		}
+		
+		if (priorityId > 0) {// 優先する弾があるか
+			bullet = this.findItemId(priorityId);
+			if (bullet != null) {
+				return bullet;
+				
+			} else {// なくなっていた場合は優先を消す
+				if (useType == -2) {
+					this._arrowId = 0;
+				}
+				if (useType == -3) {
+					this._stingId = 0;
+				}
+			}
+		}
+
+		for (final Object itemObject : this._items) {// 弾を探す
+			bullet = (L1ItemInstance) itemObject;
+			if (bullet.getItem().getUseType() == useType) {
+				if (useType == -2) {// 箭
+					this._arrowId = bullet.getItem().getItemId(); // 優先にしておく
+				}
+				
+				if (useType == -3) {
+					this._stingId = bullet.getItem().getItemId(); // 優先にしておく
+				}
+				return bullet;
+			}
+		}
+		return null;
+	}
+
+	// 優先するアローの設定
+	public void setArrow(final int id) {
+		this._arrowId = id;
+	}
+
+	// 優先するスティングの設定
+	public void setSting(final int id) {
+		this._stingId = id;
+	}
+
+	/**
+	 * 装備 hp自然回復補正
+	 * @return
+	 */
+	public int hpRegenPerTick() {
+		int hpr = 0;
+		try {
+			for (final Object itemObject : this._items) {
+				final L1ItemInstance item = (L1ItemInstance) itemObject;
+				if (item.isEquipped()) {
+					hpr += item.getItem().get_addhpr();
+				}
+			}
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+		return hpr;
+	}
+
+	/**
+	 * 装備 mp自然回復補正
+	 * @return
+	 */
+	public int mpRegenPerTick() {
+		int mpr = 0;
+		try {
+			for (final Object itemObject : this._items) {
+				final L1ItemInstance item = (L1ItemInstance) itemObject;
+				if (item.isEquipped()) {
+					mpr += item.getItem().get_addmpr();
+				}
+			}
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+		return mpr;
+	}
+
+	/**
+	 * 傳回隨機掉落物品
+	 * @return
+	 */
+	public L1ItemInstance caoPenalty() {
+		try {
+			final Random random = new Random();
+			final int rnd = random.nextInt(_items.size());
+			final L1ItemInstance penaltyItem = _items.get(rnd);
+			// 天寶
+			if (penaltyItem.getItem().getItemId() == 44070) {
+				return null;
+			}
+			
+			// 金幣
+			if (penaltyItem.getItem().getItemId() == L1ItemId.ADENA) {
+				return null;
+			}
+			
+			// 不可刪除物品
+			if (penaltyItem.getItem().isCantDelete()) {
+				return null;
+			}
+			
+			// 不可轉移物品
+			if (!penaltyItem.getItem().isTradable()) {
+				return null;
+			}
+			
+			// 具有時間限制
+			if (penaltyItem.get_time() != null) {
+				return null;
+			}
+			
+			// 寵物項圈
+			final Object[] petlist = this._owner.getPetList().values().toArray();
+			for (final Object petObject : petlist) {
+				if (petObject instanceof L1PetInstance) {
+					final L1PetInstance pet = (L1PetInstance) petObject;
+					if (penaltyItem.getId() == pet.getItemObjId()) {
+						return null;
+					}
+				}
+			}
+
+			// 取回娃娃
+			if (_owner.getDoll(penaltyItem.getId()) != null) {
+				return null;
+			}
+
+			// 解除使用狀態
+			this.setEquipped(penaltyItem, false);
+			return penaltyItem;
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+		return null;
+	}
+
+	/**
+	 * 移除全部指定編號道具
+	 * @param itemId
+	 */
+	public void delQuestItem(final int itemId) {
+		try {
+			final Random random = new Random();
+			for (L1ItemInstance item : this._items) {
+				if (item.getItemId() == itemId) {
+					removeItem(item); 
+					// 445：\f1%0%s 漸漸變熱之後燃燒成灰燼。  
+					// 446：\f1%0%s 凍結之後破碎。  
+					// 447：\f1%0%s 經過狂烈的震動之後變成土。  
+					// 448：\f1%0%s 漸漸腐蝕之後被風吹散。  
+					this._owner.sendPackets(new S_ServerMessage(random.nextInt(4) + 445, item.getName()));
+				}
+			}
+			
+		} catch (final Exception e) {
+			_log.error(e.getLocalizedMessage(), e);
+		}
+	}
+	
+	/** 無 */
+	private static final byte EQUIPMENT_INDEX_NONE = 0;
+
+	/** 頭盔 */
+	private static final byte EQUIPMENT_INDEX_HEML = 1;
+
+	/** 盔甲 */
+	private static final byte EQUIPMENT_INDEX_ARMOR = 2;
+
+	/** 内衣 */
+	private static final byte EQUIPMENT_INDEX_T = 3;
+
+	/** 斗篷 */
+	private static final byte EQUIPMENT_INDEX_CLOAK = 4;
+
+	/** 靴子 */
+	private static final byte EQUIPMENT_INDEX_BOOTS = 5;
+
+	/** 手套 */
+	private static final byte EQUIPMENT_INDEX_GLOVE = 6;
+
+	/** 盾牌 or 臂甲 */
+	private static final byte EQUIPMENT_INDEX_SHIELD = 7;
+
+	/** 武器 */
+	private static final byte EQUIPMENT_INDEX_WEAPON = 8;
+
+	/** 項鏈 */
+	private static final byte EQUIPMENT_INDEX_NECKLACE = 10;
+
+	/** 腰帶 */
+	private static final byte EQUIPMENT_INDEX_BELT = 11;
+
+	/** 耳環 */
+	private static final byte EQUIPMENT_INDEX_EARRING = 12;
+
+	/** 戒指1 */
+	private static final byte EQUIPMENT_INDEX_RING1 = 18;
+
+	/** 戒指2 */
+	private static final byte EQUIPMENT_INDEX_RING2 = 19;
+
+	/** 戒指3 */
+	private static final byte EQUIPMENT_INDEX_RING3 = 20;
+
+	/** 戒指4 */
+	private static final byte EQUIPMENT_INDEX_RING4 = 21;
+
+	/** 符紋 */
+	private static final byte EQUIPMENT_INDEX_AMULET1 = 22;
+	private static final byte EQUIPMENT_INDEX_AMULET2 = 23;
+	private static final byte EQUIPMENT_INDEX_AMULET3 = 24;
+	private static final byte EQUIPMENT_INDEX_AMULET4 = 25;
+	private static final byte EQUIPMENT_INDEX_AMULET5 = 26;
+
+	private final byte intoEquipWindow(final int equipType) {
+		switch (equipType) {
+		case 1: // 頭盔
+			return EQUIPMENT_INDEX_HEML;
+
+		case 2: // 盔甲
+			return EQUIPMENT_INDEX_ARMOR;
+
+		case 3: // 内衣
+			return EQUIPMENT_INDEX_T;
+
+		case 4: // 斗篷
+			return EQUIPMENT_INDEX_CLOAK;
+
+		case 5: // 手套
+			return EQUIPMENT_INDEX_GLOVE;
+
+		case 6: // 靴子
+			return EQUIPMENT_INDEX_BOOTS;
+
+		case 7: // 盾牌
+		case 13: // 臂甲
+			return EQUIPMENT_INDEX_SHIELD;
+
+		case 8: // 項鏈
+			return EQUIPMENT_INDEX_NECKLACE;
+
+		case 9: // 戒指
+
+			return this.getRingsIndex();
+
+		case 10: // 腰帶
+			return EQUIPMENT_INDEX_BELT;
+
+		case 12: // 耳環
+			return EQUIPMENT_INDEX_EARRING;
+
+		case 14: // 符紋2
+			return EQUIPMENT_INDEX_AMULET2;
+
+		case 15: // 符紋1
+			return EQUIPMENT_INDEX_AMULET1;
+
+		case 16: // 符紋3
+			return EQUIPMENT_INDEX_AMULET3;
+
+		case 17: // 符紋4
+			return EQUIPMENT_INDEX_AMULET4;
+
+		case 18: // 符紋5
+			return EQUIPMENT_INDEX_AMULET5;
+
+		default: // 未知裝備
+			return EQUIPMENT_INDEX_NONE;
+		}
+	}
+	
+	/**
+	 * 3.63 戒指
+	 * 
+	 * @return
+	 */
+	private final byte getRingsIndex() {
+		boolean leftSpace = true;
+		boolean rightSpace = true;
+
+		boolean leftExtraSpace = (_owner.getRingsExpansion() & 1) == 1;
+		boolean rightExtraSpace = (_owner.getRingsExpansion() & 2) == 2;
+
+		for (final L1ItemInstance item : this._items) {
+			if (item.isEquipped()) {
+				if (item.getEquipWindow() == EQUIPMENT_INDEX_RING1) {
+					leftSpace = false;
+				} else if (item.getEquipWindow() == EQUIPMENT_INDEX_RING2) {
+					rightSpace = false;
+				}
+
+				else if (item.getEquipWindow() == EQUIPMENT_INDEX_RING3) {
+					leftExtraSpace = false;
+				} else if (item.getEquipWindow() == EQUIPMENT_INDEX_RING4) {
+					rightExtraSpace = false;
+				}
+			}
+		}
+
+		if (leftSpace || rightSpace) {
+			return leftSpace ? EQUIPMENT_INDEX_RING1 : EQUIPMENT_INDEX_RING2;
+		}
+
+		else if (leftExtraSpace || rightExtraSpace) {
+			return leftExtraSpace ? EQUIPMENT_INDEX_RING3 : EQUIPMENT_INDEX_RING4;
+		}
+
+		return EQUIPMENT_INDEX_NONE;
+	}
+}

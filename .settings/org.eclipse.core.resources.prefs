@@ -1,0 +1,15 @@
+eclipse.preferences.version=1
+encoding//config/altsettings.properties=UTF-8
+encoding//config/events.properties=UTF-8
+encoding//config/ipcheck.properties=UTF-8
+encoding//config/other.properties=UTF-8
+encoding//config/rates.properties=UTF-8
+encoding//config/record.properties=UTF-8
+encoding//config/server.properties=UTF-8
+encoding//config/sql.properties=UTF-8
+encoding//dist/config/altsettings.properties=UTF-8
+encoding//src/com/lineage/JarDecoder.java=UTF-8
+encoding/<project>=UTF-8
+encoding/build.xml=UTF-8
+encoding/html=big5
+encoding/src=UTF-8

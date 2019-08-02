@@ -1,0 +1,4 @@
+
+YiweiServiceSystem = 客服系統 (請用連線 Mysql 實體IP 連接 )
+
+連結完成後 重啟系統 在連入系統即可正式上線
